@@ -1,0 +1,27 @@
+# docker-compose.yml for SwiftlyS2 Documentation MCP Server
+
+services:
+  doc-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    # Increase file descriptor limits to prevent "too many open files" errors
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/sse || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - ./docs:/app/docs:ro  # Mount docs as read-only
+      - ./logs:/app/logs
