@@ -84,7 +84,27 @@ pip install -r requirements.txt
 
 ## Deployment
 
-### Docker Deployment (Recommended)
+### Quick Deploy (Linux/macOS) - Recommended
+
+Use the automated deployment script for the fastest setup:
+
+```bash
+git clone https://github.com/shmitzas/docs-mcp.git
+cd docs-mcp
+chmod +x deploy-docs.sh
+./deploy-docs.sh
+```
+
+The script will:
+- ✅ Verify Docker and Docker Compose are installed
+- 📚 Count and validate documentation files
+- 🔨 Build and start the server automatically
+- 📡 Display server URL and MCP configuration
+- 🎯 Provide helpful management commands
+
+### Manual Docker Deployment (All Platforms)
+
+For Windows or manual control, use Docker Compose directly:
 
 1. **Clone the repository**
    ```bash
