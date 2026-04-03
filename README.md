@@ -129,6 +129,83 @@ For Windows or manual control, use Docker Compose directly:
 - **`list_documentation_categories`** - List all available categories
 - **`browse_category`** - Get all documents in a category
 - **`get_api_overview`** - Get documentation statistics and overview
+- **`get_server_health`** - Monitor server health, resource usage, and performance metrics
+- **`clear_cache`** - Manually clear file cache to free memory
+
+## Resource Management
+
+The server implements robust resource management to handle high query volumes without requiring restarts:
+
+### Automatic Safeguards
+
+- **Connection Limiting**: Maximum concurrent requests (default: 100) prevents resource exhaustion
+- **Request Deduplication**: Multiple identical concurrent requests share the same execution, eliminating redundant work
+- **Result Caching**: Frequently called operations cached for 60 seconds (configurable), dramatically reducing response times
+- **LRU File Caching**: Frequently accessed docs cached in memory (default: 500 files)
+- **Graceful Degradation**: Requests queue when at capacity rather than being dropped
+- **File Descriptor Management**: Proper file handle cleanup prevents "too many open files" errors
+- **Memory Management**: Automatic garbage collection and cache eviction
+
+### Performance Optimizations
+
+The server automatically optimizes these frequently-called operations:
+- `get_api_overview` - Cached and deduplicated
+- `list_documentation_categories` - Cached and deduplicated
+- `search_documentation` - Cached and deduplicated (per query)
+- `browse_category` - Cached and deduplicated (per category)
+- `get_document` - Cached and deduplicated (per document)
+
+**Request Deduplication**: When multiple clients request the same data simultaneously (e.g., 10 concurrent `get_api_overview` calls), only one execution occurs. All requests receive the same result, saving CPU and memory.
+
+**Result Caching**: Recent results are cached for the TTL period. Repeated identical requests within 60 seconds return instantly from cache without re-execution.
+
+### Configuration
+
+Tune resource limits via environment variables in `docker-compose.yml`:
+
+```yaml
+environment:
+  - MAX_CONCURRENT_REQUESTS=100  # Max simultaneous requests
+  - FILE_CACHE_SIZE=500          # LRU cache size for file contents
+  - RESULT_CACHE_TTL=60          # Cache operation results for N seconds
+  - CLEANUP_INTERVAL=300         # Reserved for future auto-cleanup (seconds)
+```
+
+### Monitoring
+
+Use the `get_server_health` tool to monitor:
+- Open file descriptors
+- Memory usage (MB and %)
+- CPU utilization
+- File cache hit/miss rates and size
+- Result cache size and TTL
+- Active request count
+- Available connection slots
+- Deduplicated (in-flight) request count
+
+### Maintenance
+
+The `clear_cache` tool allows manual cache clearing when needed:
+- Clears both file cache and result cache
+- Frees memory by running garbage collection
+- Returns before/after statistics for both caches
+- Useful during low-traffic periods or after heavy usage
+
+### Resource Limits
+
+Docker resource limits are configured in `docker-compose.yml`:
+
+```yaml
+ulimits:
+  nofile:
+    soft: 65536   # File descriptor limit
+    hard: 65536
+deploy:
+  resources:
+    limits:
+      cpus: '2'
+      memory: 1G
+```
 
 ## Usage Examples
 

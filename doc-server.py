@@ -10,8 +10,14 @@ MCP clients to search and retrieve documentation content.
 import asyncio
 import os
 import re
+import gc
+import psutil
+import time
+import hashlib
+import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+from functools import lru_cache, wraps
 from fastmcp import FastMCP
 
 # Create the FastMCP server
@@ -23,6 +29,149 @@ mcp = FastMCP(
 
 # Base documentation directory
 DOCS_DIR = Path(__file__).parent / "docs"
+
+# Configuration for resource management (can be overridden via environment variables)
+MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', 100))  # Limit concurrent requests
+FILE_CACHE_SIZE = int(os.getenv('FILE_CACHE_SIZE', 500))  # LRU cache size for file contents
+CLEANUP_INTERVAL = int(os.getenv('CLEANUP_INTERVAL', 300))  # Run cleanup every 5 minutes
+RESULT_CACHE_TTL = int(os.getenv('RESULT_CACHE_TTL', 60))  # Cache results for 60 seconds
+
+# Global semaphore to limit concurrent requests
+request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+# Request deduplication: track in-flight requests to avoid duplicate work
+inflight_requests: Dict[str, asyncio.Future] = {}
+inflight_lock = asyncio.Lock()
+
+class TTLCache:
+    """Simple TTL cache for function results"""
+    
+    def __init__(self, ttl: int = 60):
+        self.cache: Dict[str, tuple[Any, float]] = {}
+        self.ttl = ttl
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache if not expired"""
+        if key in self.cache:
+            value, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl:
+                return value
+            else:
+                del self.cache[key]
+        return None
+    
+    def set(self, key: str, value: Any):
+        """Set value in cache with current timestamp"""
+        self.cache[key] = (value, time.time())
+    
+    def clear(self):
+        """Clear all cached values"""
+        self.cache.clear()
+    
+    def size(self) -> int:
+        """Get current cache size"""
+        # Clean expired entries first
+        current_time = time.time()
+        expired_keys = [k for k, (_, ts) in self.cache.items() if current_time - ts >= self.ttl]
+        for k in expired_keys:
+            del self.cache[k]
+        return len(self.cache)
+
+# Result cache for frequently called operations
+result_cache = TTLCache(ttl=RESULT_CACHE_TTL)
+
+class ResourceMonitor:
+    """Monitor and log resource usage"""
+    
+    @staticmethod
+    def get_open_files_count():
+        """Get count of open file descriptors"""
+        try:
+            process = psutil.Process()
+            return process.num_fds() if hasattr(process, 'num_fds') else len(process.open_files())
+        except:
+            return -1
+    
+    @staticmethod
+    def log_resources():
+        """Log current resource usage"""
+        try:
+            process = psutil.Process()
+            open_files = ResourceMonitor.get_open_files_count()
+            memory_info = process.memory_info()
+            print(f"Resource usage - Open FDs: {open_files}, Memory: {memory_info.rss / 1024 / 1024:.2f} MB")
+        except Exception as e:
+            print(f"Error monitoring resources: {e}")
+
+def cached_and_deduplicated(cache_key_func=None):
+    """
+    Decorator that adds both caching and request deduplication.
+    
+    - Caching: Stores results for RESULT_CACHE_TTL seconds
+    - Deduplication: Multiple concurrent identical requests share the same execution
+    
+    Args:
+        cache_key_func: Optional function to generate cache key from args. 
+                       If None, uses json.dumps of kwargs.
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(**kwargs):
+            # Generate cache key
+            if cache_key_func:
+                cache_key = cache_key_func(**kwargs)
+            else:
+                # Default: use function name + sorted kwargs as key
+                cache_key = f"{func.__name__}:{json.dumps(kwargs, sort_keys=True)}"
+            
+            # Check result cache first
+            cached_result = result_cache.get(cache_key)
+            if cached_result is not None:
+                return cached_result
+            
+            # Check if request is already in-flight
+            async with inflight_lock:
+                if cache_key in inflight_requests:
+                    # Wait for the in-flight request to complete
+                    future = inflight_requests[cache_key]
+                else:
+                    # Create new future for this request
+                    future = asyncio.Future()
+                    inflight_requests[cache_key] = future
+            
+            # If we're waiting on another request, await it
+            if future.done() or cache_key not in inflight_requests or inflight_requests[cache_key] != future:
+                try:
+                    result = await future
+                    return result
+                except Exception:
+                    # If the other request failed, try ourselves
+                    pass
+            
+            # We're the first request, execute the function
+            try:
+                result = await func(**kwargs)
+                
+                # Cache the result
+                result_cache.set(cache_key, result)
+                
+                # Set the future result for any waiting requests
+                if not future.done():
+                    future.set_result(result)
+                
+                return result
+            except Exception as e:
+                # Propagate exception to waiting requests
+                if not future.done():
+                    future.set_exception(e)
+                raise
+            finally:
+                # Remove from in-flight requests
+                async with inflight_lock:
+                    inflight_requests.pop(cache_key, None)
+        
+        return wrapper
+    return decorator
 
 class DocSearcher:
     """Documentation search and retrieval tool"""
@@ -62,18 +211,25 @@ class DocSearcher:
                 return line[2:].strip()
         return "Untitled"
     
+    @lru_cache(maxsize=FILE_CACHE_SIZE)
     def _load_content(self, doc_path: str) -> str:
-        """Lazy load document content on demand"""
+        """Lazy load document content on demand with LRU caching"""
         doc_info = self.doc_index.get(doc_path)
         if not doc_info:
             return ""
         
         try:
+            # Use context manager to ensure file is always closed
             with open(doc_info['full_path'], 'r', encoding='utf-8') as f:
                 return f.read()
         except Exception as e:
             print(f"Error loading {doc_path}: {e}")
             return ""
+    
+    def clear_cache(self):
+        """Clear the file content cache to free memory"""
+        self._load_content.cache_clear()
+        gc.collect()  # Force garbage collection
     
     def search_docs(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """Search documentation by query string"""
@@ -178,6 +334,7 @@ class DocSearcher:
 doc_searcher = DocSearcher(DOCS_DIR)
 
 @mcp.tool()
+@cached_and_deduplicated()
 async def search_documentation(query: str, max_results: int = 10) -> dict:
     """
     Search Shmitz documentation for relevant content.
@@ -189,14 +346,16 @@ async def search_documentation(query: str, max_results: int = 10) -> dict:
     Returns:
         A dictionary containing search results with paths, titles, scores, and context snippets
     """
-    results = doc_searcher.search_docs(query, max_results)
-    return {
-        "query": query,
-        "total_results": len(results),
-        "results": results
-    }
+    async with request_semaphore:
+        results = doc_searcher.search_docs(query, max_results)
+        return {
+            "query": query,
+            "total_results": len(results),
+            "results": results
+        }
 
 @mcp.tool()
+@cached_and_deduplicated()
 async def get_document(doc_path: str) -> dict:
     """
     Retrieve the full content of a specific documentation file.
@@ -207,9 +366,11 @@ async def get_document(doc_path: str) -> dict:
     Returns:
         A dictionary containing the document path, title, and full content
     """
-    return doc_searcher.get_doc_content(doc_path)
+    async with request_semaphore:
+        return doc_searcher.get_doc_content(doc_path)
 
 @mcp.tool()
+@cached_and_deduplicated()
 async def list_documentation_categories() -> dict:
     """
     List all available documentation categories.
@@ -217,13 +378,15 @@ async def list_documentation_categories() -> dict:
     Returns:
         A dictionary containing a list of all documentation categories
     """
-    categories = doc_searcher.list_categories()
-    return {
-        "total_categories": len(categories),
-        "categories": categories
-    }
+    async with request_semaphore:
+        categories = doc_searcher.list_categories()
+        return {
+            "total_categories": len(categories),
+            "categories": categories
+        }
 
 @mcp.tool()
+@cached_and_deduplicated()
 async def browse_category(category: str) -> dict:
     """
     Browse all documentation in a specific category.
@@ -234,14 +397,16 @@ async def browse_category(category: str) -> dict:
     Returns:
         A dictionary containing all documents in the specified category
     """
-    docs = doc_searcher.get_docs_by_category(category)
-    return {
-        "category": category,
-        "total_documents": len(docs),
-        "documents": docs
-    }
+    async with request_semaphore:
+        docs = doc_searcher.get_docs_by_category(category)
+        return {
+            "category": category,
+            "total_documents": len(docs),
+            "documents": docs
+        }
 
 @mcp.tool()
+@cached_and_deduplicated()
 async def get_api_overview() -> dict:
     """
     Get an overview of the Shmitz documentation.
@@ -249,20 +414,133 @@ async def get_api_overview() -> dict:
     Returns:
         A dictionary containing statistics and overview of available documentation
     """
-    total_docs = len(doc_searcher.doc_cache)
-    categories = doc_searcher.list_categories()
+    async with request_semaphore:
+        total_docs = len(doc_searcher.doc_index)
+        categories = doc_searcher.list_categories()
+        
+        # Get some featured documents
+        intro_doc = doc_searcher.get_doc_content("introduction.md")
+        intro_content = intro_doc.get('content', 'Not found')
+        intro_preview = intro_content[:500] + "..." if len(intro_content) > 500 else intro_content
+        
+        return {
+            "total_documents": total_docs,
+            "total_categories": len(categories),
+            "categories": categories,
+            "introduction": intro_preview
+        }
+
+@mcp.tool()
+async def get_server_health() -> dict:
+    """
+    Get server health and resource usage statistics.
     
-    # Get some featured documents
-    intro_doc = doc_searcher.get_doc_content("introduction.md")
-    intro_content = intro_doc.get('content', 'Not found')
-    intro_preview = intro_content[:500] + "..." if len(intro_content) > 500 else intro_content
+    Returns:
+        A dictionary containing server health metrics, resource usage, and cache statistics
+    """
+    try:
+        process = psutil.Process()
+        open_files = ResourceMonitor.get_open_files_count()
+        memory_info = process.memory_info()
+        cache_info = doc_searcher._load_content.cache_info()
+        
+        # Calculate semaphore availability
+        available_slots = request_semaphore._value
+        
+        # Get result cache stats
+        result_cache_size = result_cache.size()
+        
+        # Get inflight request count
+        async with inflight_lock:
+            inflight_count = len(inflight_requests)
+        
+        return {
+            "status": "healthy",
+            "resources": {
+                "open_file_descriptors": open_files,
+                "memory_mb": round(memory_info.rss / 1024 / 1024, 2),
+                "memory_percent": round(process.memory_percent(), 2),
+                "cpu_percent": round(process.cpu_percent(), 2)
+            },
+            "file_cache": {
+                "hits": cache_info.hits,
+                "misses": cache_info.misses,
+                "current_size": cache_info.currsize,
+                "max_size": FILE_CACHE_SIZE,
+                "hit_rate": round(cache_info.hits / (cache_info.hits + cache_info.misses) * 100, 2) if (cache_info.hits + cache_info.misses) > 0 else 0
+            },
+            "result_cache": {
+                "current_size": result_cache_size,
+                "ttl_seconds": RESULT_CACHE_TTL
+            },
+            "concurrency": {
+                "max_concurrent_requests": MAX_CONCURRENT_REQUESTS,
+                "available_slots": available_slots,
+                "active_requests": MAX_CONCURRENT_REQUESTS - available_slots,
+                "deduplicated_requests": inflight_count
+            },
+            "indexed_documents": len(doc_searcher.doc_index)
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+@mcp.tool()
+async def clear_cache() -> dict:
+    """
+    Manually clear the file content cache and run garbage collection.
+    Useful for freeing memory when needed.
     
-    return {
-        "total_documents": total_docs,
-        "total_categories": len(categories),
-        "categories": categories,
-        "introduction": intro_preview
-    }
+    Returns:
+        A dictionary with before/after memory statistics
+    """
+    try:
+        # Get stats before cleanup
+        process = psutil.Process()
+        memory_before = process.memory_info().rss / 1024 / 1024
+        cache_info_before = doc_searcher._load_content.cache_info()
+        result_cache_size_before = result_cache.size()
+        
+        # Perform cleanup
+        doc_searcher.clear_cache()
+        result_cache.clear()
+        
+        # Clear inflight requests (shouldn't be any, but just in case)
+        async with inflight_lock:
+            inflight_requests.clear()
+        
+        # Get stats after cleanup
+        memory_after = process.memory_info().rss / 1024 / 1024
+        cache_info_after = doc_searcher._load_content.cache_info()
+        result_cache_size_after = result_cache.size()
+        
+        return {
+            "status": "success",
+            "memory_freed_mb": round(memory_before - memory_after, 2),
+            "file_cache_before": {
+                "size": cache_info_before.currsize,
+                "hits": cache_info_before.hits,
+                "misses": cache_info_before.misses
+            },
+            "file_cache_after": {
+                "size": cache_info_after.currsize,
+                "hits": cache_info_after.hits,
+                "misses": cache_info_after.misses
+            },
+            "result_cache_before": {
+                "size": result_cache_size_before
+            },
+            "result_cache_after": {
+                "size": result_cache_size_after
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 # Run the server
 if __name__ == "__main__":
@@ -278,10 +556,27 @@ if __name__ == "__main__":
     print(f"Starting Shmitz Documentation Server...")
     print(f"Documentation path: {DOCS_DIR}")
     print(f"Indexed {len(doc_searcher.doc_index)} documents")
+    print(f"Max concurrent requests: {MAX_CONCURRENT_REQUESTS}")
+    print(f"File cache size: {FILE_CACHE_SIZE}")
+    print(f"Result cache TTL: {RESULT_CACHE_TTL}s")
+    print(f"Cleanup interval: {CLEANUP_INTERVAL}s")
+    print(f"Optimizations: Request deduplication & result caching enabled")
+    
+    # Log initial resource usage
+    ResourceMonitor.log_resources()
     
     # Get port from environment or use default
     port = int(os.getenv('PORT', 8080))
     
-    # Run the FastMCP server with SSE transport
-    # Note: File descriptor limits are handled by Docker ulimits config
-    mcp.run(transport="sse", port=port, host="0.0.0.0")
+    try:
+        # Run the FastMCP server (blocks until shutdown)
+        # FastMCP handles its own event loop
+        mcp.run(transport="sse", port=port, host="0.0.0.0")
+    except KeyboardInterrupt:
+        print("\nShutting down gracefully...")
+        doc_searcher.clear_cache()
+    except Exception as e:
+        print(f"Server error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
