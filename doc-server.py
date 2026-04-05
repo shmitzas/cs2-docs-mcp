@@ -23,8 +23,20 @@ from fastmcp import FastMCP
 # Create the FastMCP server
 mcp = FastMCP(
     name="Shmitz Documentation Server",
-    instructions="Use this server to search and retrieve Shmitz documentation. "
-                 "You can search for specific topics, browse categories, or get detailed documentation content."
+    instructions=(
+        "Use this server to search and retrieve Shmitz documentation. "
+        "IMPORTANT USAGE RULES:\n"
+        "1. NEVER guess document paths. Always obtain paths from browse_category or search_documentation results.\n"
+        "2. DISCOVERY WORKFLOW: Call list_documentation_categories to see available categories, "
+        "then call browse_category with the exact category name (e.g. 'swiftlys2') to list all documents "
+        "and their exact paths. Use those paths with get_document.\n"
+        "3. SEARCH QUERIES: search_documentation uses exact substring matching — use a single short keyword "
+        "or a type/class name (e.g. 'ICommandContext', 'database', 'commands'). "
+        "Do NOT use long natural-language phrases or multiple words joined together — they will return no results.\n"
+        "4. PATH FORMAT: doc_path must be the relative path exactly as returned by browse_category or "
+        "search_documentation results (e.g. 'swiftlys2/docs-api-commands-icommandcontext.md'). "
+        "Do not construct or infer paths yourself."
+    )
 )
 
 # Base documentation directory
@@ -369,10 +381,19 @@ doc_searcher = DocSearcher(DOCS_DIR)
 @cached_and_deduplicated()
 async def search_documentation(query: str, max_results: int = 10) -> dict:
     """
-    Search Shmitz documentation for relevant content.
+    Search Shmitz documentation for relevant content using exact substring matching.
+
+    IMPORTANT: This tool matches documents where the query string appears as an exact substring
+    in the title or content. Use a SINGLE short keyword or a type/class name for best results.
+    Examples of good queries: "ICommandContext", "database", "commands", "IConVar"
+    Examples of BAD queries: "command context interface properties sender reply args"
+    (multi-word natural-language phrases will almost always return zero results)
+
+    To discover what documents exist, prefer browse_category over search_documentation.
+    Use the exact 'path' values from results when calling get_document.
     
     Args:
-        query: Search query string (e.g., "commands", "entity system", "database")
+        query: A single keyword or type/class name to search for (e.g., "ICommandContext", "database")
         max_results: Maximum number of results to return (default: 10)
     
     Returns:
@@ -391,9 +412,14 @@ async def search_documentation(query: str, max_results: int = 10) -> dict:
 async def get_document(doc_path: str) -> dict:
     """
     Retrieve the full content of a specific documentation file.
+
+    IMPORTANT: doc_path MUST be a path exactly as returned by browse_category or
+    search_documentation (e.g. "swiftlys2/docs-api-commands-icommandcontext.md").
+    Never construct or guess a path — always use a value from browse/search results.
     
     Args:
-        doc_path: Relative path to the documentation file (from search results)
+        doc_path: Exact relative path to the documentation file as returned by browse_category
+                  or search_documentation (e.g. "swiftlys2/docs-api-commands-icommandcontext.md")
     
     Returns:
         A dictionary containing the document path, title, and full content
