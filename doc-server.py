@@ -303,32 +303,64 @@ class DocSearcher:
         return {'error': f'Document not found: {doc_path}'}
     
     def list_categories(self) -> List[str]:
-        """List all documentation categories"""
+        """List all top-level documentation categories (subdirectories of docs/)"""
         categories = set()
         for doc_path in self.doc_index.keys():
             parts = Path(doc_path).parts
-            if len(parts) > 1:
-                # Use the directory name as category
-                if parts[0] == 'docs-split':
-                    # Extract category from filename pattern
-                    filename = parts[-1]
-                    if filename.startswith('docs-'):
-                        category = filename.split('-')[1]
-                        categories.add(category)
-                else:
-                    categories.add(parts[0])
+            if len(parts) > 0:
+                categories.add(parts[0])
         return sorted(list(categories))
     
     def get_docs_by_category(self, category: str) -> List[Dict[str, Any]]:
-        """Get all documents in a specific category"""
+        """Get all documents whose top-level category exactly matches the given name"""
         results = []
         for doc_path, doc_info in self.doc_index.items():
-            if category.lower() in doc_path.lower():
+            parts = Path(doc_path).parts
+            if parts and parts[0].lower() == category.lower():
                 results.append({
                     'path': doc_path,
                     'title': doc_info['title']
                 })
         return results
+
+    def get_category_tree(self) -> Dict[str, Any]:
+        """
+        Build a hierarchical tree of categories, sub-categories, and documents.
+
+        Structure:
+          {
+            "<category>": {
+              "documents": [{"path": ..., "title": ...}, ...],
+              "subcategories": {
+                "<subcategory>": {
+                  "documents": [{"path": ..., "title": ...}, ...]
+                }, ...
+              }
+            }, ...
+          }
+        """
+        tree: Dict[str, Any] = {}
+        for doc_path, doc_info in self.doc_index.items():
+            parts = Path(doc_path).parts
+            entry = {'path': doc_path, 'title': doc_info['title']}
+            if len(parts) == 1:
+                # Document directly in docs/ root (unusual)
+                cat = '__root__'
+                tree.setdefault(cat, {'documents': [], 'subcategories': {}})
+                tree[cat]['documents'].append(entry)
+            elif len(parts) == 2:
+                # docs/<category>/document.md
+                cat = parts[0]
+                tree.setdefault(cat, {'documents': [], 'subcategories': {}})
+                tree[cat]['documents'].append(entry)
+            else:
+                # docs/<category>/<subcategory>/...document.md
+                cat = parts[0]
+                subcat = parts[1]
+                tree.setdefault(cat, {'documents': [], 'subcategories': {}})
+                tree[cat]['subcategories'].setdefault(subcat, {'documents': []})
+                tree[cat]['subcategories'][subcat]['documents'].append(entry)
+        return tree
 
 # Initialize the documentation searcher
 doc_searcher = DocSearcher(DOCS_DIR)
@@ -373,36 +405,66 @@ async def get_document(doc_path: str) -> dict:
 @cached_and_deduplicated()
 async def list_documentation_categories() -> dict:
     """
-    List all available documentation categories.
+    List all available documentation categories with their sub-categories and document counts.
+    Each top-level directory in docs/ is a category. Sub-directories within a category are
+    sub-categories. Use browse_category to list the actual documents inside a category.
     
     Returns:
-        A dictionary containing a list of all documentation categories
+        A dictionary containing the full category tree with document counts
     """
     async with request_semaphore:
-        categories = doc_searcher.list_categories()
+        tree = doc_searcher.get_category_tree()
+        summary = {}
+        for cat, data in tree.items():
+            subcats = {}
+            for subcat, subdata in data['subcategories'].items():
+                subcats[subcat] = {'document_count': len(subdata['documents'])}
+            summary[cat] = {
+                'direct_document_count': len(data['documents']),
+                'subcategories': subcats
+            }
         return {
-            "total_categories": len(categories),
-            "categories": categories
+            "total_categories": len(summary),
+            "categories": summary
         }
 
 @mcp.tool()
 @cached_and_deduplicated()
 async def browse_category(category: str) -> dict:
     """
-    Browse all documentation in a specific category.
+    Browse all documentation in a specific category, organized by sub-category.
+    The category must be the exact name of a top-level directory inside docs/.
+    Use list_documentation_categories first to discover valid category names and
+    their sub-categories.
     
     Args:
-        category: Category name (e.g., "api", "development", "guides")
+        category: Exact category name (top-level directory in docs/, e.g. "swiftlys2")
     
     Returns:
-        A dictionary containing all documents in the specified category
+        A dictionary with direct documents and sub-categories (each with their documents)
     """
     async with request_semaphore:
-        docs = doc_searcher.get_docs_by_category(category)
+        tree = doc_searcher.get_category_tree()
+        cat_lower = category.lower()
+        # Find matching category (case-insensitive)
+        matched_key = next((k for k in tree if k.lower() == cat_lower), None)
+        if matched_key is None:
+            available = sorted(tree.keys())
+            return {
+                "error": f"Category '{category}' not found.",
+                "available_categories": available
+            }
+        data = tree[matched_key]
         return {
-            "category": category,
-            "total_documents": len(docs),
-            "documents": docs
+            "category": matched_key,
+            "direct_documents": data['documents'],
+            "subcategories": {
+                subcat: subdata['documents']
+                for subcat, subdata in data['subcategories'].items()
+            },
+            "total_documents": len(data['documents']) + sum(
+                len(sd['documents']) for sd in data['subcategories'].values()
+            )
         }
 
 @mcp.tool()
@@ -416,18 +478,18 @@ async def get_api_overview() -> dict:
     """
     async with request_semaphore:
         total_docs = len(doc_searcher.doc_index)
-        categories = doc_searcher.list_categories()
-        
-        # Get some featured documents
-        intro_doc = doc_searcher.get_doc_content("introduction.md")
-        intro_content = intro_doc.get('content', 'Not found')
-        intro_preview = intro_content[:500] + "..." if len(intro_content) > 500 else intro_content
-        
+        tree = doc_searcher.get_category_tree()
+        categories_summary = {}
+        for cat, data in tree.items():
+            subcats = list(data['subcategories'].keys())
+            categories_summary[cat] = {
+                'direct_document_count': len(data['documents']),
+                'subcategories': subcats
+            }
         return {
             "total_documents": total_docs,
-            "total_categories": len(categories),
-            "categories": categories,
-            "introduction": intro_preview
+            "total_categories": len(categories_summary),
+            "categories": categories_summary
         }
 
 @mcp.tool()
