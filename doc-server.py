@@ -194,33 +194,41 @@ class DocSearcher:
         self._index_documents()
     
     def _index_documents(self):
-        """Index all markdown files in the docs directory (metadata only)"""
+        """Index all text-based files in the docs directory (metadata only)"""
         if not self.docs_path.exists():
             print(f"Warning: Documentation directory not found: {self.docs_path}")
             return
         
-        for md_file in self.docs_path.rglob("*.md"):
+        for doc_file in self.docs_path.rglob("*"):
+            if not doc_file.is_file():
+                continue
             try:
-                with open(md_file, 'r', encoding='utf-8') as f:
+                with open(doc_file, 'r', encoding='utf-8') as f:
                     # Only read first few lines to get title, not full content
                     first_lines = [next(f, '') for _ in range(10)]
-                    title = self._extract_title(''.join(first_lines))
+                    title = self._extract_title(''.join(first_lines), doc_file.name)
                     
-                    relative_path = md_file.relative_to(self.docs_path)
+                    relative_path = doc_file.relative_to(self.docs_path)
                     self.doc_index[str(relative_path)] = {
                         'path': str(relative_path),
-                        'full_path': str(md_file),
+                        'full_path': str(doc_file),
                         'title': title
                     }
+            except (UnicodeDecodeError, ValueError):
+                # Skip binary files that can't be read as text
+                pass
             except Exception as e:
-                print(f"Error indexing {md_file}: {e}")
+                print(f"Error indexing {doc_file}: {e}")
     
-    def _extract_title(self, content: str) -> str:
-        """Extract title from markdown content"""
+    def _extract_title(self, content: str, filename: str = "") -> str:
+        """Extract title from document content, falling back to filename"""
         lines = content.split('\n')
         for line in lines[:10]:  # Check first 10 lines
             if line.startswith('# '):
                 return line[2:].strip()
+        # For non-markdown files, use the filename (without extension) as the title
+        if filename:
+            return Path(filename).stem
         return "Untitled"
     
     @lru_cache(maxsize=FILE_CACHE_SIZE)
@@ -361,12 +369,12 @@ class DocSearcher:
                 tree.setdefault(cat, {'documents': [], 'subcategories': {}})
                 tree[cat]['documents'].append(entry)
             elif len(parts) == 2:
-                # docs/<category>/document.md
+                # docs/<category>/document
                 cat = parts[0]
                 tree.setdefault(cat, {'documents': [], 'subcategories': {}})
                 tree[cat]['documents'].append(entry)
             else:
-                # docs/<category>/<subcategory>/...document.md
+                # docs/<category>/<subcategory>/...document
                 cat = parts[0]
                 subcat = parts[1]
                 tree.setdefault(cat, {'documents': [], 'subcategories': {}})
