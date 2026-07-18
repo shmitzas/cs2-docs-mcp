@@ -30,6 +30,22 @@ clients within seconds. **No container restart is required.**
 The egg's `docker_images` entry points at `ghcr.io/shmitzas/cs2-docs-mcp:latest`.
 Change that key/value in `cs2-docs-mcp.egg.json` if you're pushing somewhere else.
 
+### CI (recommended)
+
+[`.github/workflows/build-image.yml`](../.github/workflows/build-image.yml)
+already does the multi-arch build + push to `ghcr.io/<owner>/cs2-docs-mcp` on
+every push to `main` that touches the image (and on published releases).
+Nothing to run locally — just merge to `main` and the new tag lands.
+
+Two prerequisites the first time you set the repo up:
+
+- **Enable GHCR write** — Repository → Settings → Actions → General → Workflow
+  permissions → "Read and write permissions" (so `GITHUB_TOKEN` can push).
+- **Package visibility** — after the first push, https://github.com/users/&lt;owner&gt;/packages/container/cs2-docs-mcp/settings
+  → set to **Public** so Pterodactyl nodes can pull without credentials.
+
+### Manual build (only if you can't use CI)
+
 From the repo root:
 
 ```bash
@@ -44,10 +60,6 @@ docker buildx build \
     -t ghcr.io/shmitzas/cs2-docs-mcp:latest \
     --push .
 ```
-
-If you want CI to do this on every push to `main`, drop a GitHub Actions
-workflow that runs `docker/build-push-action@v6` with the same context and
-tag — the egg will pull the new tag on next server restart.
 
 ---
 
