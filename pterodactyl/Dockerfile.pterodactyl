@@ -1,0 +1,51 @@
+# Pterodactyl-friendly image for the CS2 Docs MCP server.
+#
+# Differs from the top-level Dockerfile in three ways:
+#   1. App files live under /app/ instead of /home/container/ so the
+#      Pterodactyl volume mount at /home/container doesn't hide them.
+#   2. Runs as the unprivileged `container` user (UID 988) that wings
+#      expects — pip installs happen BEFORE the USER switch so they
+#      persist under the volume mount.
+#   3. Installs git / curl / flock so the daily update scripts work
+#      inside the container.
+FROM python:3.11-slim
+
+# System deps needed by the update scripts (git for shallow clones,
+# curl for the swiftlys2 fetch, flock for the per-script lockfiles).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        gawk \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pterodactyl-style unprivileged user. UID 988 is the wings convention.
+RUN useradd -m -u 988 -d /home/container container
+
+# Stage the app OUTSIDE /home/container — that path is masked by the
+# server's persistent volume at runtime.
+WORKDIR /app
+COPY --chown=container:container requirements.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY --chown=container:container doc-server.py            /app/
+COPY --chown=container:container update-all.sh            /app/
+COPY --chown=container:container update-swiftlys2.sh      /app/
+COPY --chown=container:container update-source2.sh        /app/
+COPY --chown=container:container update-cs2-gametracking.sh /app/
+COPY --chown=container:container pterodactyl/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/*.sh
+
+USER container
+ENV USER=container HOME=/home/container PYTHONUNBUFFERED=1 \
+    DOCS_ROOT=/home/container/docs \
+    CACHE_ROOT=/home/container/.cache \
+    UPDATE_SCRIPT=/app/update-all.sh \
+    PORT=8080
+WORKDIR /home/container
+EXPOSE 8080
+
+# Pterodactyl ignores ENTRYPOINT/CMD — set for `docker run` parity only.
+ENTRYPOINT ["/app/entrypoint.sh"]

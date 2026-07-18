@@ -1,7 +1,7 @@
-# docker-compose.yml for SwiftlyS2 Documentation MCP Server
+# docker-compose.yml for CS2 Docs MCP Server
 
 services:
-  doc-mcp-server:
+  cs2-docs-mcp:
     build:
       context: .
       dockerfile: Dockerfile

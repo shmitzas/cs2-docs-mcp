@@ -1,4 +1,4 @@
-# Dockerfile for SwiftlyS2 Documentation MCP Server
+# Dockerfile for CS2 Docs MCP Server
 FROM python:3.11-slim
 
 # Set working directory

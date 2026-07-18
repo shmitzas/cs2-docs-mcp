@@ -1,8 +1,8 @@
-# Documentation MCP Server
+# CS2 Docs MCP Server
 
-This repository provides a production-ready **remote MCP server** for searching and retrieving technical documentation via any compatible MCP client (like Claude Desktop, Cursor, or Windsurf). Powered by the `FastMCP` framework, it enables AI assistants to access comprehensive documentation for multiple projects and frameworks.
+This repository provides a production-ready **remote MCP server** for searching and retrieving CS2-related technical documentation via any compatible MCP client (like Claude Desktop, Cursor, Windsurf, VS Code Copilot, or Visual Studio). Powered by the `FastMCP` framework, it enables AI assistants to access documentation for [SwiftlyS2](https://swiftlys2.net/), Source 2, GameTracking-CS2, and supporting projects.
 
-This server hosts documentation for various projects in Markdown format. The codebase is modular and easy to extend for additional documentation sets.
+Documentation lives under `docs/` as Markdown; the codebase is modular and easy to extend for additional documentation sets.
 
 ## Features
 
@@ -13,17 +13,34 @@ This server hosts documentation for various projects in Markdown format. The cod
 - ⚡ **Performance Optimized**: Lazy-loading with metadata indexing for fast responses
 - 🚀 **Async Operations**: Non-blocking operations with proper timeout handling
 - 🐳 **Docker Ready**: Easy deployment with Docker Compose
-- 🔌 **MCP Compatible**: Works with Claude Desktop, Cursor, Windsurf, and other MCP clients
+- 🥚 **Pterodactyl Ready**: Egg + daily update schedule under [`pterodactyl/`](pterodactyl/README.md)
+- 🔌 **MCP Compatible**: Works with Claude Desktop, Cursor, Windsurf, VS Code Copilot, Visual Studio, and other MCP clients
 
 ## Configuration
 
+### Port & endpoint
+
+The server speaks the **SSE transport** of MCP. Two things every client needs:
+
+| What         | Value                                    | How to change it                                                              |
+| ------------ | ---------------------------------------- | ----------------------------------------------------------------------------- |
+| **Port**     | `8080` by default                        | Set the `PORT` env var (Docker Compose, `-e PORT=...`, or the egg's `Port` variable) |
+| **Endpoint** | `/sse`                                   | Fixed by FastMCP's SSE transport                                              |
+| **URL shape**| `http://<host>:<port>/sse`               | e.g. `http://localhost:8080/sse` for local dev                                |
+
+Deployment-specific host/port:
+
+- **Docker Compose** (top-level `docker-compose.yml`): `http://localhost:8080/sse` (host port `8080` is published).
+- **Pterodactyl egg**: `http://<node-ip>:<allocated-port>/sse` — the allocated port is whatever primary allocation you assigned in the panel and set as the `Port` variable.
+- **Behind a reverse proxy**: proxy `/sse` (and streams under it) to the container's `8080`; then the client URL is `https://your.domain/sse`.
+
 ### Configure in Your IDE or Client
 
-**Visual Studio Code** - `C:\Users\<YourUsername>\AppData\Roaming\Code\User\mcp.json`:
+**Visual Studio Code** — `C:\Users\<YourUsername>\AppData\Roaming\Code\User\mcp.json`:
 ```json
 {
     "servers": {
-        "docs-mcp": {
+        "cs2-docs-mcp": {
             "url": "http://example.com:8080/sse",
             "type": "http"
         }
@@ -32,12 +49,12 @@ This server hosts documentation for various projects in Markdown format. The cod
 }
 ```
 
-**Visual Studio** - `C:\Users\<YourUsername>\.mcp.json`:
+**Visual Studio** — `C:\Users\<YourUsername>\.mcp.json`:
 ```json
 {
     "inputs": [],
     "servers": {
-        "docs-mcp": {
+        "cs2-docs-mcp": {
             "type": "http",
             "url": "http://example.com:8080/sse",
             "headers": {}
@@ -46,11 +63,11 @@ This server hosts documentation for various projects in Markdown format. The cod
 }
 ```
 
-**Claude Desktop** - `%APPDATA%\Claude\claude_desktop_config.json`:
+**Claude Desktop** — `%APPDATA%\Claude\claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "docs-mcp": {
+    "cs2-docs-mcp": {
       "url": "http://example.com:8080/sse"
     }
   }
@@ -59,7 +76,7 @@ This server hosts documentation for various projects in Markdown format. The cod
 
 **Other clients**: Cursor and Windsurf support similar configuration in their respective config files.
 
-> Replace `http://example.com:8080/sse` with your deployed server URL or `http://localhost:8080/sse` for local development.
+> Replace `http://example.com:8080/sse` with your deployed server URL, or `http://localhost:8080/sse` for local development. The `:8080` is the default `PORT`; substitute whatever your deployment actually listens on.
 
 ## Installation
 
@@ -214,6 +231,44 @@ deploy:
 - "Show me all configuration documentation"
 - "Get the full documentation for setup guide"
 - "What documentation is available here?"
+
+## Keeping Documentation Fresh
+
+Three updater scripts pull the latest content from upstream into `docs/`:
+
+| Script | Source | Target |
+| --- | --- | --- |
+| `update-swiftlys2.sh` | `https://swiftlys2.net/llms-full.txt` | `docs/swiftlys2/` |
+| `update-source2.sh` | `github.com/Source2Wiki/Source2Wiki` | `docs/source2/` |
+| `update-cs2-gametracking.sh` | `github.com/SteamTracking/GameTracking-CS2` | `docs/counter-strike-2/GameTracking-CS2/` |
+| `update-all.sh` | (runs all three) | — |
+
+Requirements on the host: `bash`, `curl`, `git`, `awk`, `flock`, `sed` — everything ships with a base Debian install.
+
+Wire up on Debian:
+
+```bash
+chmod +x update-*.sh
+mkdir -p logs
+
+# Test once manually first — the CS2 tracking clone downloads ~160 MB
+./update-all.sh
+```
+
+Then add a daily cron entry (as the user that owns the repo):
+
+```cron
+# m h  dom mon dow  command
+30 4  *   *   *    cd /path/to/docs-mcp && ./update-all.sh >> logs/update.log 2>&1
+```
+
+Each script uses `flock` so overlapping cron runs cannot collide. `update-all.sh` runs each updater independently — a broken upstream in one source will not stop the others, and cron still sees a non-zero exit code if any failed.
+
+Notes:
+- The swiftlys2 splitter writes to a staging dir and atomically swaps in, so a mid-run failure never leaves the live tree half-populated.
+- The source2 script shallow-clones into `.cache/source2wiki/` (gitignored) and mirrors only the doc-content subdirectories, skipping Docusaurus TS/CSS.
+- The CS2 tracking script does a shallow clone on first run; subsequent runs do a delta `git fetch --depth 1`. Expect several hundred MB of on-disk footprint.
+- If you have an old manually-extracted `docs/counter-strike-2/GameTracking-CS2-master/` alongside the new git checkout, delete it once you have verified the new mirror.
 
 ## Troubleshooting
 

@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# Quick deployment script for Shmitz Documentation MCP Server
+# Quick deployment script for CS2 Docs MCP Server
 # Uses 'docker compose' (V2). For older installations, replace with 'docker-compose'
 
 set -e
 
-echo "🚀 Shmitz Documentation MCP Server - Quick Deploy"
-echo "=================================================="
+echo "🚀 CS2 Docs MCP Server - Quick Deploy"
+echo "====================================="
 
 # Check if Docker is installed
 if ! command -v docker &> /dev/null; then
@@ -61,9 +61,9 @@ if docker compose ps | grep -q "Up"; then
     echo ""
     echo '   {
      "mcpServers": {
-       "swiftlys2-docs": {
+       "cs2-docs-mcp": {
          "url": "http://'"$SERVER_IP"':'"$PORT"'/sse",
-         "description": "Shmitz Documentation Server"
+         "description": "CS2 Docs MCP Server"
        }
      }
    }'

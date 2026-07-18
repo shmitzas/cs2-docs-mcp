@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-MCP Documentation Server for Shmitz
+CS2 Docs MCP Server
 
-This MCP server provides documentation search capabilities for the Shmitz
-documentation stored in the docs/ directory. It allows GitHub Copilot and other
-MCP clients to search and retrieve documentation content.
+This MCP server provides documentation search capabilities for CS2-related
+documentation (SwiftlyS2, Source 2, GameTracking-CS2, and friends) stored in
+the docs/ directory. It allows GitHub Copilot and other MCP clients to search
+and retrieve documentation content.
 """
 
 import asyncio
@@ -15,6 +16,9 @@ import psutil
 import time
 import hashlib
 import json
+import sys
+import threading
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from functools import lru_cache, wraps
@@ -22,9 +26,10 @@ from fastmcp import FastMCP
 
 # Create the FastMCP server
 mcp = FastMCP(
-    name="Shmitz Documentation Server",
+    name="CS2 Docs MCP",
     instructions=(
-        "Use this server to search and retrieve Shmitz documentation. "
+        "Use this server to search and retrieve CS2-related documentation "
+        "(SwiftlyS2, Source 2, GameTracking-CS2, plus supporting projects). "
         "IMPORTANT USAGE RULES:\n"
         "1. NEVER guess document paths. Always obtain paths from browse_category or search_documentation results.\n"
         "2. DISCOVERY WORKFLOW: Call list_documentation_categories to see available categories, "
@@ -39,8 +44,10 @@ mcp = FastMCP(
     )
 )
 
-# Base documentation directory
-DOCS_DIR = Path(__file__).parent / "docs"
+# Base documentation directory. Overridable via DOCS_ROOT env var — under
+# Pterodactyl the persistent volume mounts at /home/container so we point
+# DOCS_ROOT there instead of the (ephemeral) directory next to the script.
+DOCS_DIR = Path(os.getenv('DOCS_ROOT', str(Path(__file__).parent / "docs")))
 
 # Configuration for resource management (can be overridden via environment variables)
 MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', 100))  # Limit concurrent requests
@@ -250,6 +257,44 @@ class DocSearcher:
         """Clear the file content cache to free memory"""
         self._load_content.cache_clear()
         gc.collect()  # Force garbage collection
+
+    def reindex(self) -> int:
+        """
+        Rebuild the metadata index from disk and clear all content caches.
+        Safe to call from a background thread while requests are in flight:
+        we build the new index into a local dict, swap it in atomically
+        (single reference assignment), then drop cached file contents.
+        Returns the new document count.
+        """
+        old_docs_path = self.docs_path
+        # Re-honour DOCS_ROOT in case it changed (rare but cheap).
+        self.docs_path = Path(os.getenv('DOCS_ROOT', str(old_docs_path)))
+        new_index: Dict[str, Dict[str, str]] = {}
+        if self.docs_path.exists():
+            for doc_file in self.docs_path.rglob("*"):
+                if not doc_file.is_file():
+                    continue
+                try:
+                    with open(doc_file, 'r', encoding='utf-8') as f:
+                        first_lines = [next(f, '') for _ in range(10)]
+                        title = self._extract_title(''.join(first_lines), doc_file.name)
+                        relative_path = doc_file.relative_to(self.docs_path)
+                        new_index[str(relative_path)] = {
+                            'path': str(relative_path),
+                            'full_path': str(doc_file),
+                            'title': title
+                        }
+                except (UnicodeDecodeError, ValueError):
+                    pass
+                except Exception as e:
+                    print(f"Error indexing {doc_file}: {e}")
+        else:
+            print(f"Warning: Documentation directory not found: {self.docs_path}")
+        # Atomic swap — readers holding the old dict finish their loop safely.
+        self.doc_index = new_index
+        # Drop cached file contents so freshly-edited files aren't served stale.
+        self.clear_cache()
+        return len(new_index)
     
     def search_docs(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """Search documentation by query string"""
@@ -389,7 +434,7 @@ doc_searcher = DocSearcher(DOCS_DIR)
 @cached_and_deduplicated()
 async def search_documentation(query: str, max_results: int = 10) -> dict:
     """
-    Search Shmitz documentation for relevant content using exact substring matching.
+    Search CS2 documentation for relevant content using exact substring matching.
 
     IMPORTANT: This tool matches documents where the query string appears as an exact substring
     in the title or content. Use a SINGLE short keyword or a type/class name for best results.
@@ -505,7 +550,7 @@ async def browse_category(category: str) -> dict:
 @cached_and_deduplicated()
 async def get_api_overview() -> dict:
     """
-    Get an overview of the Shmitz documentation.
+    Get an overview of the CS2 documentation.
     
     Returns:
         A dictionary containing statistics and overview of available documentation
@@ -638,6 +683,70 @@ async def clear_cache() -> dict:
             "error": str(e)
         }
 
+
+# ---------------------------------------------------------------------------
+# Console command handler
+# ---------------------------------------------------------------------------
+# Pterodactyl schedules trigger tasks by writing a "console command" to the
+# container's stdin. We read stdin from a daemon thread and dispatch the
+# supported commands. The two useful ones:
+#   update-docs  — run /app/update-all.sh (or $UPDATE_SCRIPT), then reindex
+#   reindex      — rebuild the metadata index only (no fetch)
+#
+# The daily 04:00 schedule sends `update-docs`. Reindex happens inline once
+# the update script exits, so no container restart is required to pick up
+# new / renamed / deleted markdown files.
+_update_lock = threading.Lock()
+
+
+def _run_updates_and_reindex():
+    """Shell out to the updater then rebuild the index. Serialised by lock."""
+    if not _update_lock.acquire(blocking=False):
+        print("[console] update-docs: another update is already running; ignoring")
+        return
+    try:
+        script = os.getenv('UPDATE_SCRIPT', '/app/update-all.sh')
+        if not os.path.isfile(script):
+            print(f"[console] update-docs: script not found at {script}")
+            return
+        print(f"[console] update-docs: running {script}")
+        # inherit stdout/stderr so Pterodactyl's console shows script output live
+        rc = subprocess.call(['bash', script])
+        print(f"[console] update-docs: script exited with rc={rc}; reindexing...")
+        count = doc_searcher.reindex()
+        print(f"[console] update-docs: reindex complete ({count} documents)")
+    except Exception as e:
+        print(f"[console] update-docs: error: {e}")
+    finally:
+        _update_lock.release()
+
+
+def _console_reader():
+    """Read stdin line-by-line and dispatch supported commands.
+
+    Runs as a daemon thread — dies when the main process exits.
+    Silently returns on EOF (e.g. detached stdin under `docker run -d`)."""
+    try:
+        for raw in sys.stdin:
+            cmd = raw.strip().lower()
+            if not cmd:
+                continue
+            if cmd == 'update-docs':
+                # spawn on its own thread so a long-running clone doesn't
+                # block the reader from picking up further commands
+                threading.Thread(target=_run_updates_and_reindex, daemon=True).start()
+            elif cmd == 'reindex':
+                try:
+                    count = doc_searcher.reindex()
+                    print(f"[console] reindex: complete ({count} documents)")
+                except Exception as e:
+                    print(f"[console] reindex: error: {e}")
+            else:
+                print(f"[console] unknown command: {cmd!r} (try: update-docs, reindex)")
+    except Exception as e:
+        print(f"[console] reader stopped: {e}")
+
+
 # Run the server
 if __name__ == "__main__":
     import sys
@@ -649,7 +758,7 @@ if __name__ == "__main__":
         print("Please ensure the docs directory exists with documentation files.")
         sys.exit(1)
     
-    print(f"Starting Shmitz Documentation Server...")
+    print(f"Starting CS2 Docs MCP Server...")
     print(f"Documentation path: {DOCS_DIR}")
     print(f"Indexed {len(doc_searcher.doc_index)} documents")
     print(f"Max concurrent requests: {MAX_CONCURRENT_REQUESTS}")
@@ -663,7 +772,15 @@ if __name__ == "__main__":
     
     # Get port from environment or use default
     port = int(os.getenv('PORT', 8080))
-    
+
+    # Start the console command reader (Pterodactyl schedules speak stdin).
+    # Daemon thread so it dies with the process on shutdown.
+    threading.Thread(target=_console_reader, daemon=True).start()
+
+    # Unique marker for Pterodactyl's `config.startup.done` detection. Must
+    # be printed exactly once, right before mcp.run() blocks the main thread.
+    print(f"Documentation MCP server ready on port {port}", flush=True)
+
     try:
         # Run the FastMCP server (blocks until shutdown)
         # FastMCP handles its own event loop

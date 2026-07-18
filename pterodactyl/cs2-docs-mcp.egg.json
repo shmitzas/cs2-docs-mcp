@@ -1,0 +1,82 @@
+{
+    "_comment": "CS2 Docs MCP Server egg for Pterodactyl. Pair with the image built from pterodactyl/Dockerfile.pterodactyl. Set up a daily 04:00 schedule with a 'Send command' task of payload 'update-docs' to auto-refresh docs (reindex happens inline, no restart needed).",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-07-18T00:00:00+00:00",
+    "name": "CS2 Docs MCP Server",
+    "author": "shmitzas@example.com",
+    "description": "Remote MCP server (FastMCP over SSE) that indexes CS2-related markdown docs — SwiftlyS2, Source 2, GameTracking-CS2, and friends — and exposes search/browse tools to MCP clients like Claude Desktop, Cursor, and VS Code Copilot. Includes daily update scripts for swiftlys2, source2, and GameTracking-CS2 — trigger with the 'update-docs' console command (or a daily 04:00 schedule) and the index hot-reloads without restarting.",
+    "features": null,
+    "docker_images": {
+        "cs2-docs-mcp (ghcr.io)": "ghcr.io/shmitzas/cs2-docs-mcp:latest"
+    },
+    "file_denylist": [],
+    "startup": "bash /app/entrypoint.sh",
+    "config": {
+        "files": "{}",
+        "startup": "{\r\n    \"done\": \"Documentation MCP server ready on port\"\r\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/bash\nset -e\nmkdir -p /mnt/server/docs /mnt/server/.cache\necho 'Install complete. On first start, run the console command:  update-docs'\necho 'to populate docs/. Or upload markdown files under /home/container/docs/ via the File Manager.'\n",
+            "container": "ghcr.io/pterodactyl/installers:debian",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Port",
+            "description": "TCP port the MCP server listens on. Must match the primary allocation port assigned to this server.",
+            "env_variable": "PORT",
+            "default_value": "8080",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:1024,65535",
+            "field_type": "text"
+        },
+        {
+            "name": "Max Concurrent Requests",
+            "description": "Semaphore limit on in-flight MCP tool invocations. Raise for busier deployments; default is fine for personal use.",
+            "env_variable": "MAX_CONCURRENT_REQUESTS",
+            "default_value": "100",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:1,10000",
+            "field_type": "text"
+        },
+        {
+            "name": "File Cache Size",
+            "description": "Max number of document file contents kept in memory (LRU). Larger = faster repeat reads, more RAM.",
+            "env_variable": "FILE_CACHE_SIZE",
+            "default_value": "500",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:10,100000",
+            "field_type": "text"
+        },
+        {
+            "name": "Result Cache TTL",
+            "description": "Seconds that identical MCP tool call results are memoised. Set to 0 to disable.",
+            "env_variable": "RESULT_CACHE_TTL",
+            "default_value": "60",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:0,3600",
+            "field_type": "text"
+        },
+        {
+            "name": "Cleanup Interval",
+            "description": "Seconds between internal cache cleanup passes. Increase on tight-memory nodes.",
+            "env_variable": "CLEANUP_INTERVAL",
+            "default_value": "300",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:30,86400",
+            "field_type": "text"
+        }
+    ]
+}
