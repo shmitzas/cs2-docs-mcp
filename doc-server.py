@@ -294,6 +294,11 @@ class DocSearcher:
         self.doc_index = new_index
         # Drop cached file contents so freshly-edited files aren't served stale.
         self.clear_cache()
+        # Also drop the tool-level TTL result cache: otherwise MCP clients
+        # calling the same query within RESULT_CACHE_TTL seconds after a
+        # reindex would get the pre-update JSON. dict.clear() is GIL-atomic
+        # so this is safe from a non-asyncio thread.
+        result_cache.clear()
         return len(new_index)
     
     def search_docs(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
@@ -776,6 +781,16 @@ if __name__ == "__main__":
     # Start the console command reader (Pterodactyl schedules speak stdin).
     # Daemon thread so it dies with the process on shutdown.
     threading.Thread(target=_console_reader, daemon=True).start()
+
+    # Auto-refresh docs on every boot. Runs in a background thread so the
+    # MCP server can start serving immediately — the index hot-reloads once
+    # the update completes. Set UPDATE_ON_STARTUP=0 to disable (useful for
+    # local dev with pinned docs). Silently skipped if the update script
+    # isn't present (e.g. the root docker-compose image doesn't ship it).
+    _startup_script = os.getenv('UPDATE_SCRIPT', '/app/update-all.sh')
+    if os.getenv('UPDATE_ON_STARTUP', '1') != '0' and os.path.isfile(_startup_script):
+        print("[startup] auto-refresh: docs update queued in the background")
+        threading.Thread(target=_run_updates_and_reindex, daemon=True).start()
 
     # Unique marker for Pterodactyl's `config.startup.done` detection. Must
     # be printed exactly once, right before mcp.run() blocks the main thread.

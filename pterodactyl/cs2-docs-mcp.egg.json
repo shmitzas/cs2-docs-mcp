@@ -77,6 +77,16 @@
             "user_editable": true,
             "rules": "required|integer|between:30,86400",
             "field_type": "text"
+        },
+        {
+            "name": "Auto-refresh On Startup",
+            "description": "When 1, the server runs /app/update-all.sh in a background thread on every boot so a scheduled Restart is enough to keep docs fresh. Set to 0 to disable (useful for offline / pinned-docs deployments).",
+            "env_variable": "UPDATE_ON_STARTUP",
+            "default_value": "1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|in:0,1",
+            "field_type": "text"
         }
     ]
 }

@@ -3,8 +3,11 @@
 #
 # Pterodactyl mounts the persistent server volume at /home/container, so
 # anything the update scripts write there survives restarts. This entrypoint
-# just guarantees the directories exist, then execs the MCP server so its
-# stdin is attached to Pterodactyl's console.
+# just guarantees the directories exist, then execs the MCP server — which
+# kicks off the docs refresh in the background on every start (see the
+# UPDATE_ON_STARTUP block in doc-server.py). A daily "Send power action:
+# Restart" schedule in the panel is therefore all you need to keep docs
+# fresh; no console commands required.
 set -e
 
 : "${DOCS_ROOT:=/home/container/docs}"
@@ -12,14 +15,11 @@ set -e
 
 mkdir -p "$DOCS_ROOT" "$CACHE_ROOT"
 
-# On first boot the docs volume is empty. Print a hint (once) so users know
-# they need to either upload manual docs via the File Manager or wait for
-# the daily `update-docs` schedule to populate the auto-updated sources.
 if [ -z "$(ls -A "$DOCS_ROOT" 2>/dev/null)" ]; then
-    echo "[entrypoint] $DOCS_ROOT is empty — send the console command"
-    echo "[entrypoint]   update-docs"
-    echo "[entrypoint] to fetch swiftlys2 / source2 / GameTracking-CS2 now,"
-    echo "[entrypoint] or upload your own markdown via the File Manager."
+    echo "[entrypoint] $DOCS_ROOT is empty — first-boot fetch has been queued"
+    echo "[entrypoint] and may take several minutes (GameTracking-CS2 is a"
+    echo "[entrypoint] ~1 GB shallow clone). The MCP server is available now;"
+    echo "[entrypoint] the index will hot-reload as each source finishes."
 fi
 
 cd /home/container

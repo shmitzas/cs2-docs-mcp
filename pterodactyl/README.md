@@ -12,7 +12,14 @@ Contents:
   then execs `python3 /app/doc-server.py`.
 - `cs2-docs-mcp.egg.json` — the importable egg (`PTDL_v2`).
 
-The server accepts two **console commands** over stdin:
+**Docs refresh automatically on every container start.** The server kicks
+off `/app/update-all.sh` in a background thread as it comes up, so the MCP
+port is available immediately and the index hot-reloads as each source
+(swiftlys2 / source2 / GameTracking-CS2) finishes downloading. Set up a
+daily **Restart** schedule (section 5 below) and you're done — no console
+commands required.
+
+Two **console commands** are still available for ad-hoc use:
 
 | Command       | What it does                                                |
 | ------------- | ----------------------------------------------------------- |
@@ -88,32 +95,47 @@ docker buildx build \
 
 ## 4. First boot
 
-Hit **Start**. On the console you'll see:
+Hit **Start**. On the console you'll see something like:
 
 ```
-[entrypoint] /home/container/docs is empty — send the console command
-[entrypoint]   update-docs
-[entrypoint] to fetch swiftlys2 / source2 / GameTracking-CS2 now,
-[entrypoint] or upload your own markdown via the File Manager.
+[entrypoint] /home/container/docs is empty — first-boot fetch has been queued
+[entrypoint] and may take several minutes (GameTracking-CS2 is a
+[entrypoint] ~1 GB shallow clone). The MCP server is available now;
+[entrypoint] the index will hot-reload as each source finishes.
+[startup] auto-refresh: docs update queued in the background
 Documentation MCP server ready on port 8080
+[console] update-docs: running /app/update-all.sh
+===== update-swiftlys2.sh =====
+...
+[console] update-docs: reindex complete (N documents)
 ```
 
 Pterodactyl marks the server **Running** as soon as it sees
-`Documentation MCP server ready on port`. Send `update-docs` in the console
-to populate `/home/container/docs/` for the first time — the initial run
-takes a few minutes because the GameTracking-CS2 clone is large. Subsequent
-runs do delta fetches and take seconds.
+`Documentation MCP server ready on port` — which happens within a few
+seconds, before the update finishes. Clients can already connect; they'll
+see an empty index at first, and each source's docs appear as its updater
+completes and the atomic reindex fires.
+
+First-boot total time is typically 5–10 minutes (dominated by the
+GameTracking-CS2 clone). Subsequent restarts do delta fetches and finish
+in under a minute.
 
 Any markdown you drop into `/home/container/docs/<category>/*.md` via the
-File Manager becomes browsable after a `reindex` command (or the next
-`update-docs`).
+File Manager becomes browsable after a `reindex` console command (or the
+next restart).
+
+To turn the auto-refresh off (e.g. you want the server to boot without
+touching the network), set the server variable `UPDATE_ON_STARTUP` to `0`
+on the Startup tab. The `update-docs` and `reindex` console commands still
+work manually.
 
 ---
 
-## 5. Daily 04:00 refresh — Pterodactyl Schedule
+## 5. Daily refresh — Pterodactyl Schedule
 
-Pterodactyl **schedules** are per-server config, not baked into the egg
-export. Set the schedule up once per server:
+Since every restart auto-refreshes the docs, a scheduled **restart** is
+all you need to keep them fresh. Pterodactyl **schedules** are per-server
+config, not baked into the egg export — set this up once per server:
 
 1. Server → **Schedules** tab → **Create Schedule**.
 2. Fill in:
@@ -121,20 +143,16 @@ export. Set the schedule up once per server:
    - **Cron:** minute `0`, hour `4`, day `*`, month `*`, weekday `*`
    - **Only when server is online:** ✔
 3. Save, then **Create Task** on the new schedule:
-   - **Action:** `Send command`
-   - **Payload:** `update-docs`
+   - **Action:** `Send power action`
+   - **Payload:** `Restart`
    - **Time offset:** `0`
-4. That's it. At 04:00 every day, wings writes `update-docs\n` to the
-   container's stdin, the update scripts run, and the index hot-reloads
-   inline — no restart needed.
+4. That's it. At 04:00 every day, wings restarts the container; the
+   entrypoint boots, the background updater fetches deltas, and the
+   index reindexes inline. Clients experience a couple of seconds of
+   downtime while the container respawns.
 
-Want a belt-and-braces fallback (e.g. if the reindex ever wedges)?
-Add a **second task** on the same schedule:
-
-- **Action:** `Send power action`
-- **Payload:** `Restart`
-- **Time offset:** `900` (15 minutes — long enough for the updates to
-  finish on a slow first-run day)
+Don't want to restart at all? Skip the schedule and just refresh manually
+by sending the `update-docs` console command from the panel.
 
 ---
 
